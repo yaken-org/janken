@@ -48,13 +48,19 @@ const playJanken = createServerFn({ method: 'POST' })
       max_tokens: 2048,
     })
 
-    const msg = completion.choices[0]?.message
-    const text = (msg?.content ?? '').trim()
+    const choice = completion.choices[0]
+    const msg = choice?.message
+    const reasoning = (msg as { reasoning?: string } | undefined)?.reasoning ?? ''
+    // reasoningモデルなので content が空でも reasoning の中に答えが出ることがある
+    const text = `${msg?.content ?? ''} ${reasoning}`.trim()
     let aiHand: Hand
     if (text.includes('グー')) aiHand = 'グー'
     else if (text.includes('チョキ')) aiHand = 'チョキ'
     else if (text.includes('パー')) aiHand = 'パー'
-    else throw new Error(`AIの返答が不正です: ${JSON.stringify(msg)}`)
+    else
+      throw new Error(
+        `AIの返答が不正です: finish_reason=${choice?.finish_reason} usage=${JSON.stringify(completion.usage)} msg=${JSON.stringify(msg)}`,
+      )
 
     return { aiHand, result: judge(playerHand, aiHand) }
   })
