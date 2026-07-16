@@ -85,6 +85,8 @@ const playJanken = createServerFn({ method: 'POST' })
 export const Route = createFileRoute('/')({ component: App })
 
 const HISTORY_KEY = 'janken-history'
+const STREAK_KEY = 'janken-streak'
+const SITE_URL = 'https://curly-cell-293a.yaken.workers.dev'
 
 function loadHistory(): Hand[] {
   if (typeof window === 'undefined') return []
@@ -110,15 +112,47 @@ function saveHistory(history: Hand[]) {
   }
 }
 
+// 連続記録: 正の数=連勝, 負の数=連敗, 0=記録なし
+function loadStreak(): number {
+  if (typeof window === 'undefined') return 0
+  const n = Number(window.localStorage.getItem(STREAK_KEY))
+  return Number.isFinite(n) ? n : 0
+}
+
+function saveStreak(streak: number) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(STREAK_KEY, String(streak))
+  } catch {
+    /* ignore */
+  }
+}
+
+// 結果を受けて連勝/連敗を更新する（あいこは維持）
+function nextStreak(prev: number, result: GameResult['result']): number {
+  if (result === '勝ち') return prev > 0 ? prev + 1 : 1
+  if (result === '負け') return prev < 0 ? prev - 1 : -1
+  return prev
+}
+
+// 連続記録を人間向けの文言にする
+function streakLabel(streak: number): string {
+  if (streak > 0) return `${streak}連勝中`
+  if (streak < 0) return `${-streak}連敗中`
+  return '記録なし'
+}
+
 function App() {
   const [playerHand, setPlayerHand] = useState<Hand | null>(null)
   const [gameResult, setGameResult] = useState<GameResult | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [history, setHistory] = useState<Hand[]>([])
+  const [streak, setStreak] = useState(0)
 
   useEffect(() => {
     setHistory(loadHistory())
+    setStreak(loadStreak())
   }, [])
 
   const handlePlay = async (hand: Hand) => {
@@ -136,12 +170,30 @@ function App() {
       // AIには今回の手を含める前の履歴（=これまでの傾向）を渡す
       const result = await playJanken({ data: { hand, history } })
       setGameResult(result)
+      // 連勝/連敗を更新
+      const updated = nextStreak(streak, result.result)
+      setStreak(updated)
+      saveStreak(updated)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setPlayerHand(null)
     } finally {
       setIsLoading(false)
     }
+  }
+
+  const shareToX = () => {
+    const headline =
+      streak > 0
+        ? `AIとのじゃんけんで${streak}連勝中！🎉`
+        : streak < 0
+          ? `AIとのじゃんけんで${-streak}連敗中…😞`
+          : 'AIとじゃんけんで対戦したよ🤝'
+    const text = `${headline}\n#じゃんけん #AI対戦`
+    const url = new URL('https://twitter.com/intent/tweet')
+    url.searchParams.set('text', text)
+    url.searchParams.set('url', SITE_URL)
+    window.open(url.toString(), '_blank', 'noopener,noreferrer')
   }
 
   const handleReset = () => {
@@ -173,6 +225,15 @@ function App() {
 
         {!playerHand && !isLoading && (
           <>
+            {streak !== 0 && (
+              <p
+                className={`mb-4 text-base font-bold ${
+                  streak > 0 ? 'text-[var(--palm)]' : 'text-[#9f3030]'
+                }`}
+              >
+                {streak > 0 ? '🔥' : '💧'} {streakLabel(streak)}
+              </p>
+            )}
             <p className="mb-6 text-[var(--sea-ink-soft)]">手を選んでください</p>
             <div className="flex justify-center gap-3">
               {HANDS.map(({ hand, emoji }) => (
@@ -258,6 +319,16 @@ function App() {
               {resultEmoji} {gameResult.result}
             </div>
 
+            {streak !== 0 && (
+              <p
+                className={`mb-6 text-lg font-bold ${
+                  streak > 0 ? 'text-[var(--palm)]' : 'text-[#9f3030]'
+                }`}
+              >
+                {streak > 0 ? '🔥' : '💧'} {streakLabel(streak)}
+              </p>
+            )}
+
             {gameResult.reasoning && (
               <details className="demo-code-block mb-6 text-left">
                 <summary className="cursor-pointer text-sm font-semibold">
@@ -269,12 +340,23 @@ function App() {
               </details>
             )}
 
-            <button
-              onClick={handleReset}
-              className="demo-button demo-button-secondary"
-            >
-              もう一度
-            </button>
+            <div className="flex justify-center gap-3">
+              <button
+                onClick={handleReset}
+                className="demo-button demo-button-secondary"
+              >
+                もう一度
+              </button>
+              <button onClick={shareToX} className="demo-button">
+                <svg viewBox="0 0 16 16" aria-hidden="true" width="16" height="16">
+                  <path
+                    fill="currentColor"
+                    d="M12.6 1h2.2L10 6.48 15.64 15h-4.41L7.78 9.82 3.23 15H1l5.14-5.84L.72 1h4.52l3.12 4.73L12.6 1zm-.77 12.67h1.22L4.57 2.26H3.26l8.57 11.41z"
+                  />
+                </svg>
+                Xでシェア
+              </button>
+            </div>
           </div>
         )}
       </div>
