@@ -64,14 +64,19 @@ function App() {
   const [playerHand, setPlayerHand] = useState<Hand | null>(null)
   const [gameResult, setGameResult] = useState<GameResult | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const handlePlay = async (hand: Hand) => {
     setPlayerHand(hand)
     setGameResult(null)
+    setError(null)
     setIsLoading(true)
     try {
       const result = await playJanken({ data: hand })
       setGameResult(result)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setPlayerHand(null)
     } finally {
       setIsLoading(false)
     }
@@ -80,6 +85,7 @@ function App() {
   const handleReset = () => {
     setPlayerHand(null)
     setGameResult(null)
+    setError(null)
   }
 
   const resultEmoji =
@@ -119,6 +125,16 @@ function App() {
           <div className="py-6">
             <p className="mb-3 text-4xl">🤔</p>
             <p className="text-[var(--sea-ink-soft)]">AIが考えています…</p>
+          </div>
+        )}
+
+        {error && (
+          <div className="demo-alert demo-alert-danger py-4">
+            <p className="mb-3 text-sm font-semibold">エラーが発生しました</p>
+            <p className="mb-4 break-all font-mono text-xs opacity-80">{error}</p>
+            <button onClick={handleReset} className="demo-button demo-button-secondary text-sm">
+              もう一度
+            </button>
           </div>
         )}
 
