@@ -32,7 +32,7 @@ const playJanken = createServerFn({ method: 'POST' })
 
     const client = new OpenAI({
       apiKey,
-      baseURL: `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${CF_GATEWAY_ID}/compat`,
+      baseURL: `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${CF_GATEWAY_ID}/nvidia`,
     })
 
     const completion = await client.chat.completions.create({
