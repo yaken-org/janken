@@ -28,7 +28,7 @@ function judge(player: Hand, ai: Hand): '勝ち' | '負け' | 'あいこ' {
   return '負け'
 }
 
-type PlayInput = { hand: Hand; history: Hand[] }
+type PlayInput = { hand: Hand; history: Hand[]; memory: string }
 
 // クライアントに1行ずつ流すストリームイベント（NDJSON）
 type StreamEvent =
@@ -47,7 +47,7 @@ function pickHand(text: string): Hand | null {
 
 const playJanken = createServerFn({ method: 'POST' })
   .validator((input: PlayInput) => input)
-  .handler(async ({ data: { hand: playerHand, history } }): Promise<Response> => {
+  .handler(async ({ data: { hand: playerHand, history, memory } }): Promise<Response> => {
     const { CF_ACCOUNT_ID, CF_GATEWAY_ID } = env as Env & { OPENAI_API_KEY: string }
     const apiKey = (env as Env & { OPENAI_API_KEY: string }).OPENAI_API_KEY
 
@@ -61,8 +61,13 @@ const playJanken = createServerFn({ method: 'POST' })
     const recent = Array.isArray(history) ? history.slice(-20) : []
     const historyText =
       recent.length > 0
-        ? `これまでに相手（人間）が出した手の履歴（古い順）: ${recent.join('、')}。この傾向を読んで、相手が次に出しそうな手に勝てる手を選んでください。`
+        ? `これまでに相手（人間）が出した手の履歴（古い順）: ${recent.join('、')}。`
         : 'まだ対戦履歴はありません。'
+    // これまでに蓄積した相手の傾向メモ（localStorage由来）
+    const memoryText =
+      memory && memory.trim()
+        ? `過去の対戦から分かっている相手の傾向メモ: ${memory}`
+        : ''
 
     const stream = await client.chat.completions.create({
       model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
@@ -70,9 +75,12 @@ const playJanken = createServerFn({ method: 'POST' })
         {
           role: 'system',
           content:
-            'あなたはじゃんけんの対戦相手です。相手の過去の手の傾向を分析し、勝てる手を選びます。まず簡潔に考えたうえで、最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
+            'あなたはじゃんけんの対戦相手です。相手の過去の手の傾向やメモを分析し、相手が次に出しそうな手に勝てる手を選びます。まず簡潔に考えたうえで、最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
         },
-        { role: 'user', content: `${historyText}\nあなたの手を1つ選んでください。` },
+        {
+          role: 'user',
+          content: `${historyText}\n${memoryText}\nあなたの手を1つ選んでください。`,
+        },
       ],
       max_tokens: 4096,
       stream: true,
@@ -138,6 +146,7 @@ export const Route = createFileRoute('/')({ component: App })
 
 const HISTORY_KEY = 'janken-history'
 const STREAK_KEY = 'janken-streak'
+const MEMORY_KEY = 'janken-memory'
 
 function loadHistory(): Hand[] {
   if (typeof window === 'undefined') return []
@@ -193,6 +202,63 @@ function streakLabel(streak: number): string {
   return '記録なし'
 }
 
+// 履歴から相手の傾向を分析して、AIに渡す/localStorageに残す「メモリ」を作る
+function analyzeTendencies(history: Hand[]): string {
+  if (history.length < 3) return ''
+  const hands = HANDS.map((h) => h.hand)
+  const count = (arr: Hand[]) => {
+    const c: Record<Hand, number> = { グー: 0, チョキ: 0, パー: 0 }
+    for (const h of arr) c[h]++
+    return c
+  }
+
+  const total = history.length
+  const counts = count(history)
+  const pct = (n: number) => Math.round((n / total) * 100)
+  const freqText = [...hands]
+    .sort((a, b) => counts[b] - counts[a])
+    .map((h) => `${h}${pct(counts[h])}%`)
+    .join('・')
+
+  // 直近5手の偏り
+  const recentCounts = count(history.slice(-5))
+  const recentTop = [...hands].sort((a, b) => recentCounts[b] - recentCounts[a])[0]
+
+  // 直前の手の「次に出しがちな手」（簡易マルコフ）
+  const last = history[history.length - 1]
+  const nextCounts: Record<Hand, number> = { グー: 0, チョキ: 0, パー: 0 }
+  for (let i = 0; i < history.length - 1; i++) {
+    if (history[i] === last) nextCounts[history[i + 1]]++
+  }
+  const nextTotal = nextCounts.グー + nextCounts.チョキ + nextCounts.パー
+  const transText =
+    nextTotal > 0
+      ? `「${last}」の次は「${[...hands].sort((a, b) => nextCounts[b] - nextCounts[a])[0]}」を出しやすい。`
+      : ''
+
+  // 同じ手の連続
+  let repeat = 1
+  for (let i = history.length - 1; i > 0 && history[i] === history[i - 1]; i--)
+    repeat++
+  const repeatText = repeat >= 3 ? `直近は「${last}」を${repeat}連続。` : ''
+
+  return `全体傾向 ${freqText}。直近は「${recentTop}」寄り。${transText}${repeatText}`.trim()
+}
+
+function loadMemory(): string {
+  if (typeof window === 'undefined') return ''
+  return window.localStorage.getItem(MEMORY_KEY) ?? ''
+}
+
+function saveMemory(memory: string) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(MEMORY_KEY, memory)
+  } catch {
+    /* ignore */
+  }
+}
+
 function App() {
   const [playerHand, setPlayerHand] = useState<Hand | null>(null)
   const [gameResult, setGameResult] = useState<GameResult | null>(null)
@@ -200,11 +266,13 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [history, setHistory] = useState<Hand[]>([])
   const [streak, setStreak] = useState(0)
+  const [memory, setMemory] = useState('')
   const [liveReasoning, setLiveReasoning] = useState('')
 
   useEffect(() => {
     setHistory(loadHistory())
     setStreak(loadStreak())
+    setMemory(loadMemory())
   }, [])
 
   const handlePlay = async (hand: Hand) => {
@@ -220,8 +288,8 @@ function App() {
     saveHistory(nextHistory)
 
     try {
-      // AIには今回の手を含める前の履歴（=これまでの傾向）を渡す
-      const res = await playJanken({ data: { hand, history } })
+      // AIには今回の手を含める前の履歴と、蓄積した傾向メモを渡す
+      const res = await playJanken({ data: { hand, history, memory } })
       const bodyStream = (res as Response).body
       if (!bodyStream) throw new Error('ストリームを取得できませんでした')
 
@@ -265,6 +333,10 @@ function App() {
       const updated = nextStreak(streak, done.result)
       setStreak(updated)
       saveStreak(updated)
+      // 今回の手を含めた履歴から傾向メモを作り直して保存
+      const newMemory = analyzeTendencies(nextHistory)
+      setMemory(newMemory)
+      saveMemory(newMemory)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setPlayerHand(null)
@@ -297,6 +369,8 @@ function App() {
   const clearHistory = () => {
     setHistory([])
     saveHistory([])
+    setMemory('')
+    saveMemory('')
     handleReset()
   }
 
@@ -351,6 +425,16 @@ function App() {
                     .map((h) => HANDS.find((x) => x.hand === h)?.emoji)
                     .join(' ')}
                 </p>
+                {memory && (
+                  <div className="demo-code-block mb-3 text-left">
+                    <p className="mb-1 text-xs font-semibold text-[var(--sea-ink-soft)]">
+                      🧠 AIが覚えているあなたの傾向
+                    </p>
+                    <p className="text-xs leading-relaxed text-[var(--sea-ink-soft)]">
+                      {memory}
+                    </p>
+                  </div>
+                )}
                 <button
                   onClick={clearHistory}
                   className="demo-button demo-button-secondary text-xs"
