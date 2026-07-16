@@ -35,31 +35,25 @@ const playJanken = createServerFn({ method: 'POST' })
       baseURL: `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${CF_GATEWAY_ID}/compat`,
     })
 
-    const FALLBACK_HANDS: Hand[] = ['グー', 'チョキ', 'パー']
+    const completion = await client.chat.completions.create({
+      model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'あなたはじゃんけんの対戦相手です。「グー」「チョキ」「パー」のいずれか1語だけを返してください。それ以外の文字は絶対に含めないでください。',
+        },
+        { role: 'user', content: 'じゃんけんの手を1つ選んでください。' },
+      ],
+      max_tokens: 10,
+    })
+
+    const text = completion.choices[0]?.message.content?.trim() ?? ''
     let aiHand: Hand
-
-    try {
-      const completion = await client.chat.completions.create({
-        model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'あなたはじゃんけんの対戦相手です。「グー」「チョキ」「パー」のいずれか1語だけを返してください。それ以外の文字は絶対に含めないでください。',
-          },
-          { role: 'user', content: 'じゃんけんの手を1つ選んでください。' },
-        ],
-        max_tokens: 10,
-      })
-
-      const text = completion.choices[0]?.message.content?.trim() ?? ''
-      if (text.includes('グー')) aiHand = 'グー'
-      else if (text.includes('チョキ')) aiHand = 'チョキ'
-      else if (text.includes('パー')) aiHand = 'パー'
-      else aiHand = FALLBACK_HANDS[Math.floor(Math.random() * 3)]
-    } catch {
-      aiHand = FALLBACK_HANDS[Math.floor(Math.random() * 3)]
-    }
+    if (text.includes('グー')) aiHand = 'グー'
+    else if (text.includes('チョキ')) aiHand = 'チョキ'
+    else if (text.includes('パー')) aiHand = 'パー'
+    else throw new Error(`AIの返答が不正です: "${text}"`)
 
     return { aiHand, result: judge(playerHand, aiHand) }
   })
