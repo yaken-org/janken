@@ -5,7 +5,11 @@ import OpenAI from 'openai'
 import { useState } from 'react'
 
 type Hand = 'グー' | 'チョキ' | 'パー'
-type GameResult = { aiHand: Hand; result: '勝ち' | '負け' | 'あいこ' }
+type GameResult = {
+  aiHand: Hand
+  result: '勝ち' | '負け' | 'あいこ'
+  reasoning: string
+}
 
 const HANDS: Array<{ hand: Hand; emoji: string }> = [
   { hand: 'グー', emoji: '✊' },
@@ -33,6 +37,7 @@ const playJanken = createServerFn({ method: 'POST' })
     const client = new OpenAI({
       apiKey,
       baseURL: `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${CF_GATEWAY_ID}/custom-spark-cccd`,
+      defaultHeaders: { 'cf-aig-skip-cache': 'true' },
     })
 
     const completion = await client.chat.completions.create({
@@ -41,28 +46,31 @@ const playJanken = createServerFn({ method: 'POST' })
         {
           role: 'system',
           content:
-            'あなたはじゃんけんの対戦相手です。最後に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
+            'あなたはじゃんけんの対戦相手です。まず簡潔に考えたうえで、最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
         },
         { role: 'user', content: 'じゃんけんの手を1つ選んでください。' },
       ],
-      max_tokens: 2048,
+      max_tokens: 4096,
     })
 
     const choice = completion.choices[0]
     const msg = choice?.message
     const reasoning = (msg as { reasoning?: string } | undefined)?.reasoning ?? ''
+    const content = msg?.content ?? ''
     // reasoningモデルなので content が空でも reasoning の中に答えが出ることがある
-    const text = `${msg?.content ?? ''} ${reasoning}`.trim()
-    let aiHand: Hand
-    if (text.includes('グー')) aiHand = 'グー'
-    else if (text.includes('チョキ')) aiHand = 'チョキ'
-    else if (text.includes('パー')) aiHand = 'パー'
-    else
+    const text = `${content} ${reasoning}`.trim()
+
+    // 最後に出現した手を採用する（推論の途中に別の手が混ざるため）
+    const lastIndex = (hand: Hand) => text.lastIndexOf(hand)
+    const candidates = HANDS.map((h) => h.hand).filter((h) => lastIndex(h) >= 0)
+    if (candidates.length === 0) {
       throw new Error(
         `AIの返答が不正です: finish_reason=${choice?.finish_reason} usage=${JSON.stringify(completion.usage)} msg=${JSON.stringify(msg)}`,
       )
+    }
+    const aiHand = candidates.sort((a, b) => lastIndex(b) - lastIndex(a))[0]
 
-    return { aiHand, result: judge(playerHand, aiHand) }
+    return { aiHand, result: judge(playerHand, aiHand), reasoning: reasoning || content }
   })
 
 export const Route = createFileRoute('/')({ component: App })
@@ -176,6 +184,17 @@ function App() {
             >
               {resultEmoji} {gameResult.result}
             </div>
+
+            {gameResult.reasoning && (
+              <details className="demo-code-block mb-6 text-left">
+                <summary className="cursor-pointer text-sm font-semibold">
+                  🧠 AIの思考過程
+                </summary>
+                <p className="mt-3 whitespace-pre-wrap text-xs leading-relaxed text-[var(--sea-ink-soft)]">
+                  {gameResult.reasoning}
+                </p>
+              </details>
+            )}
 
             <button
               onClick={handleReset}
