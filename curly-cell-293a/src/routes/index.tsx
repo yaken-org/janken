@@ -65,35 +65,33 @@ async function generateComment(
       : result === '負け'
         ? 'あなた（AI）の勝ち'
         : 'あいこ（引き分け）'
-  try {
-    const res = await client.chat.completions.create({
-      model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
-      messages: [
-        {
-          role: 'system',
-          content:
-            'あなたはじゃんけんAIのキャラクターです。対戦結果を受けて、相手プレイヤーに向けた短いひとことコメント（30文字以内・日本語・絵文字は1つまで）だけを返してください。説明や思考は書かないこと。',
-        },
-        {
-          role: 'user',
-          content: `あなたの手「${aiHand}」、相手の手「${playerHand}」、結果は${outcome}。ひとことどうぞ。`,
-        },
-      ],
-      max_tokens: 2048,
-    })
-    const msg = res.choices[0]?.message as
-      | { content?: string; reasoning?: string }
-      | undefined
-    const raw = (msg?.content ?? '').trim()
-    // content優先。無ければreasoningの最終行から一文を拾う
-    const text =
-      raw ||
-      (msg?.reasoning ?? '').trim().split('\n').filter(Boolean).pop() ||
-      ''
-    return text.replace(/^["「『]|["」』]$/g, '').slice(0, 60)
-  } catch {
-    return ''
+  const res = await client.chat.completions.create({
+    model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
+    messages: [
+      {
+        role: 'system',
+        content:
+          'あなたはじゃんけんAIのキャラクターです。対戦結果を受けて、相手プレイヤーに向けた短いひとことコメント（30文字以内・日本語・絵文字は1つまで）だけを返してください。説明や思考は書かないこと。',
+      },
+      {
+        role: 'user',
+        content: `あなたの手「${aiHand}」、相手の手「${playerHand}」、結果は${outcome}。ひとことどうぞ。`,
+      },
+    ],
+    max_tokens: 2048,
+  })
+  const msg = res.choices[0]?.message as
+    | { content?: string; reasoning?: string }
+    | undefined
+  const raw = (msg?.content ?? '').trim()
+  // content優先。無ければreasoningの最終行から一文を拾う
+  const text =
+    raw || (msg?.reasoning ?? '').trim().split('\n').filter(Boolean).pop() || ''
+  const comment = text.replace(/^["「『]|["」』]$/g, '').slice(0, 60)
+  if (!comment) {
+    throw new Error(`AIのコメントを取得できませんでした: ${JSON.stringify(msg)}`)
   }
+  return comment
 }
 
 const playJanken = createServerFn({ method: 'POST' })
@@ -304,13 +302,6 @@ function analyzeTendencies(history: Hand[]): string {
   return `全体傾向 ${freqText}。直近は「${recentTop}」寄り。${transText}${repeatText}`.trim()
 }
 
-// AIコメントが取れなかったときの定型フォールバック
-function fallbackComment(result: GameResult['result']): string {
-  if (result === '勝ち') return 'やられた…！つよいね😤'
-  if (result === '負け') return 'よし、読みどおり！😎'
-  return 'ふふ、同じ手だね🤝'
-}
-
 function loadMemory(): string {
   if (typeof window === 'undefined') return ''
   return window.localStorage.getItem(MEMORY_KEY) ?? ''
@@ -394,7 +385,7 @@ function App() {
         aiHand: done.aiHand,
         result: done.result,
         reasoning: done.reasoning,
-        comment: done.comment?.trim() || fallbackComment(done.result),
+        comment: done.comment,
       })
       // 連勝/連敗を更新
       const updated = nextStreak(streak, done.result)
