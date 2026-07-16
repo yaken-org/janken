@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
 import { env } from 'cloudflare:workers'
 import OpenAI from 'openai'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 type Hand = 'グー' | 'チョキ' | 'パー'
 type GameResult = {
@@ -325,12 +325,19 @@ function App() {
   const [streak, setStreak] = useState(0)
   const [memory, setMemory] = useState('')
   const [liveReasoning, setLiveReasoning] = useState('')
+  const reasoningBoxRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setHistory(loadHistory())
     setStreak(loadStreak())
     setMemory(loadMemory())
   }, [])
+
+  // 思考過程が更新されるたびに一番下へ自動追尾
+  useEffect(() => {
+    const box = reasoningBoxRef.current
+    if (box) box.scrollTop = box.scrollHeight
+  }, [liveReasoning])
 
   const handlePlay = async (hand: Hand) => {
     setPlayerHand(hand)
@@ -509,7 +516,10 @@ function App() {
             <p className="mb-3 text-4xl">🤔</p>
             <p className="mb-4 text-[var(--sea-ink-soft)]">AIが考えています…</p>
             {liveReasoning && (
-              <div className="demo-code-block max-h-56 overflow-y-auto text-left">
+              <div
+                ref={reasoningBoxRef}
+                className="demo-code-block max-h-56 overflow-y-auto text-left"
+              >
                 <p className="mb-2 text-xs font-semibold text-[var(--sea-ink-soft)]">
                   🧠 思考中…
                 </p>
