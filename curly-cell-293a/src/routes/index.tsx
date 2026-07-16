@@ -803,10 +803,24 @@ function App() {
         )}
 
         {error && (
-          <div className="demo-alert demo-alert-danger py-4">
-            <p className="mb-3 text-sm font-semibold">エラーが発生しました</p>
-            <p className="mb-4 break-all font-mono text-xs opacity-80">{error}</p>
-            <button onClick={handleReset} className="demo-button demo-button-secondary text-sm">
+          <div className="demo-alert demo-alert-danger py-6 text-center">
+            <p className="mb-2 text-5xl">🏃💨</p>
+            <p className="mb-1 text-lg font-bold">AIが逃亡しました</p>
+            <p className="mb-4 text-xs text-[var(--sea-ink-soft)]">
+              うまく手を決められなかったようです
+            </p>
+            <details className="mb-4 text-left">
+              <summary className="cursor-pointer text-xs text-[var(--sea-ink-soft)]">
+                詳細
+              </summary>
+              <p className="mt-2 break-all font-mono text-xs opacity-70">
+                {error}
+              </p>
+            </details>
+            <button
+              onClick={handleReset}
+              className="demo-button demo-button-secondary text-sm"
+            >
               もう一度
             </button>
           </div>
