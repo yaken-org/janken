@@ -3,6 +3,7 @@ import { createServerFn } from '@tanstack/react-start'
 import { env } from 'cloudflare:workers'
 import OpenAI from 'openai'
 import { useEffect, useRef, useState } from 'react'
+import { tracer } from '../../otel'
 
 type Hand = 'グー' | 'チョキ' | 'パー'
 type GameResult = {
@@ -157,128 +158,135 @@ async function generateComment(
 const playJanken = createServerFn({ method: 'POST' })
   .validator((input: PlayInput) => input)
   .handler(async ({ data: { hand: playerHand, history, memory, think } }): Promise<Response> => {
-    const { CF_ACCOUNT_ID, CF_GATEWAY_ID } = env as Env & { OPENAI_API_KEY: string }
-    const apiKey = (env as Env & { OPENAI_API_KEY: string }).OPENAI_API_KEY
-    // 選ばれた思考量（未知の値でも think にフォールバック）
-    const thinkConf = THINK_MAP[think] ?? THINK_MAP.think
-
-    const client = new OpenAI({
-      apiKey,
-      baseURL: `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${CF_GATEWAY_ID}/custom-spark-cccd`,
-      defaultHeaders: { 'cf-aig-skip-cache': 'true' },
+    const span = tracer.startSpan('playJanken', {
+      attributes: { 'player.hand': playerHand, 'player.think': think },
     })
+    try {
+      const { CF_ACCOUNT_ID, CF_GATEWAY_ID } = env as Env & { OPENAI_API_KEY: string }
+      const apiKey = (env as Env & { OPENAI_API_KEY: string }).OPENAI_API_KEY
+      // 選ばれた思考量（未知の値でも think にフォールバック）
+      const thinkConf = THINK_MAP[think] ?? THINK_MAP.think
 
-    // 直近の履歴を最大20件渡す（history が無い/不正でも落ちないようガード）
-    const recent = Array.isArray(history) ? history.slice(-20) : []
-    const historyText =
-      recent.length > 0
-        ? `これまでに相手（人間）が出した手の履歴（古い順）: ${recent.join('、')}。`
-        : 'まだ対戦履歴はありません。'
-    // これまでに蓄積した相手の傾向メモ（localStorage由来）
-    const memoryText =
-      memory && memory.trim()
-        ? `過去の対戦から分かっている相手の傾向メモ: ${memory}`
-        : ''
+      const client = new OpenAI({
+        apiKey,
+        baseURL: `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${CF_GATEWAY_ID}/custom-spark-cccd`,
+        defaultHeaders: { 'cf-aig-skip-cache': 'true' },
+      })
 
-    const stream = await client.chat.completions.create({
-      model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
-      messages: [
-        {
-          role: 'system',
-          content:
-            'あなたはじゃんけんの対戦相手です。相手の過去の手の傾向やメモを分析し、相手が次に出しそうな手に勝てる手を選びます。最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
-        },
-        {
-          role: 'user',
-          content: `${historyText}\n${memoryText}\n${thinkConf.instruction}\nあなたの手を1つ選んでください。`,
-        },
-      ],
-      max_tokens: thinkConf.maxTokens,
-      stream: true,
-    })
+      // 直近の履歴を最大20件渡す（history が無い/不正でも落ちないようガード）
+      const recent = Array.isArray(history) ? history.slice(-20) : []
+      const historyText =
+        recent.length > 0
+          ? `これまでに相手（人間）が出した手の履歴（古い順）: ${recent.join('、')}。`
+          : 'まだ対戦履歴はありません。'
+      // これまでに蓄積した相手の傾向メモ（localStorage由来）
+      const memoryText =
+        memory && memory.trim()
+          ? `過去の対戦から分かっている相手の傾向メモ: ${memory}`
+          : ''
 
-    const encoder = new TextEncoder()
-    const send = (
-      controller: ReadableStreamDefaultController,
-      event: StreamEvent,
-    ) => controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
+      const stream = await client.chat.completions.create({
+        model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'あなたはじゃんけんの対戦相手です。相手の過去の手の傾向やメモを分析し、相手が次に出しそうな手に勝てる手を選びます。最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
+          },
+          {
+            role: 'user',
+            content: `${historyText}\n${memoryText}\n${thinkConf.instruction}\nあなたの手を1つ選んでください。`,
+          },
+        ],
+        max_tokens: thinkConf.maxTokens,
+        stream: true,
+      })
 
-    const body = new ReadableStream({
-      async start(controller) {
-        const ping = () => {
-          try {
-            send(controller, { type: 'ping' })
-          } catch {
-            /* controllerが閉じていたら無視 */
-          }
-        }
-        // 最初のバイトを即送ってストリームを確立する
-        ping()
+      const encoder = new TextEncoder()
+      const send = (
+        controller: ReadableStreamDefaultController,
+        event: StreamEvent,
+      ) => controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
 
-        let reasoning = ''
-        let content = ''
-        try {
-          for await (const chunk of stream) {
-            const delta = chunk.choices[0]?.delta as
-              | { content?: string; reasoning?: string; reasoning_content?: string }
-              | undefined
-            const r = delta?.reasoning ?? delta?.reasoning_content
-            if (r) {
-              reasoning += r
-              send(controller, { type: 'reasoning', delta: r })
-            }
-            if (delta?.content) {
-              content += delta.content
-              send(controller, { type: 'content', delta: delta.content })
-            }
-          }
-
-          const aiHand = pickHand(`${content} ${reasoning}`.trim())
-          if (!aiHand) {
-            send(controller, {
-              type: 'error',
-              message: `AIの返答から手を判定できませんでした: ${(content || reasoning).slice(-120)}`,
-            })
-          } else {
-            const result = judge(playerHand, aiHand)
-            // 先に結果を確定・送信する（このあと切断されても結果は残る）
-            send(controller, {
-              type: 'done',
-              aiHand,
-              result,
-              reasoning: reasoning || content,
-            })
-            // 結果送信後にコメントを生成して後追いで送る。
-            // 生成中は無音になるので定期pingで接続を維持する
-            const heartbeat = setInterval(ping, 4000)
+      const body = new ReadableStream({
+        async start(controller) {
+          const ping = () => {
             try {
-              const comment = await generateComment(
-                client,
-                playerHand,
+              send(controller, { type: 'ping' })
+            } catch {
+              /* controllerが閉じていたら無視 */
+            }
+          }
+          // 最初のバイトを即送ってストリームを確立する
+          ping()
+
+          let reasoning = ''
+          let content = ''
+          try {
+            for await (const chunk of stream) {
+              const delta = chunk.choices[0]?.delta as
+                | { content?: string; reasoning?: string; reasoning_content?: string }
+                | undefined
+              const r = delta?.reasoning ?? delta?.reasoning_content
+              if (r) {
+                reasoning += r
+                send(controller, { type: 'reasoning', delta: r })
+              }
+              if (delta?.content) {
+                content += delta.content
+                send(controller, { type: 'content', delta: delta.content })
+              }
+            }
+
+            const aiHand = pickHand(`${content} ${reasoning}`.trim())
+            if (!aiHand) {
+              send(controller, {
+                type: 'error',
+                message: `AIの返答から手を判定できませんでした: ${(content || reasoning).slice(-120)}`,
+              })
+            } else {
+              const result = judge(playerHand, aiHand)
+              // 先に結果を確定・送信する（このあと切断されても結果は残る）
+              send(controller, {
+                type: 'done',
                 aiHand,
                 result,
-              )
-              send(controller, { type: 'comment', text: comment })
-            } catch {
-              /* コメントは任意。取得失敗時は送らない（結果は保持） */
-            } finally {
-              clearInterval(heartbeat)
+                reasoning: reasoning || content,
+              })
+              // 結果送信後にコメントを生成して後追いで送る。
+              // 生成中は無音になるので定期pingで接続を維持する
+              const heartbeat = setInterval(ping, 4000)
+              try {
+                const comment = await generateComment(
+                  client,
+                  playerHand,
+                  aiHand,
+                  result,
+                )
+                send(controller, { type: 'comment', text: comment })
+              } catch {
+                /* コメントは任意。取得失敗時は送らない（結果は保持） */
+              } finally {
+                clearInterval(heartbeat)
+              }
             }
+          } catch (e) {
+            send(controller, {
+              type: 'error',
+              message: e instanceof Error ? e.message : String(e),
+            })
+          } finally {
+            controller.close()
           }
-        } catch (e) {
-          send(controller, {
-            type: 'error',
-            message: e instanceof Error ? e.message : String(e),
-          })
-        } finally {
-          controller.close()
-        }
-      },
-    })
+        },
+      })
 
-    return new Response(body, {
-      headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
-    })
+      return new Response(body, {
+        headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
+      })
+    } finally {
+      span.end()
+    }
   })
 
 // ===== 連勝ランキング（KV, 匿名・最大100件） =====
