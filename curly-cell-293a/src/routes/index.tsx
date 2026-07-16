@@ -30,9 +30,24 @@ function judge(player: Hand, ai: Hand): '勝ち' | '負け' | 'あいこ' {
 
 type PlayInput = { hand: Hand; history: Hand[] }
 
+// クライアントに1行ずつ流すストリームイベント（NDJSON）
+type StreamEvent =
+  | { type: 'reasoning'; delta: string }
+  | { type: 'content'; delta: string }
+  | { type: 'done'; aiHand: Hand; result: GameResult['result']; reasoning: string }
+  | { type: 'error'; message: string }
+
+// テキストから最後に出現した手を採用する（推論の途中に別の手が混ざるため）
+function pickHand(text: string): Hand | null {
+  const lastIndex = (hand: Hand) => text.lastIndexOf(hand)
+  const candidates = HANDS.map((h) => h.hand).filter((h) => lastIndex(h) >= 0)
+  if (candidates.length === 0) return null
+  return candidates.sort((a, b) => lastIndex(b) - lastIndex(a))[0]
+}
+
 const playJanken = createServerFn({ method: 'POST' })
   .validator((input: PlayInput) => input)
-  .handler(async ({ data: { hand: playerHand, history } }): Promise<GameResult> => {
+  .handler(async ({ data: { hand: playerHand, history } }): Promise<Response> => {
     const { CF_ACCOUNT_ID, CF_GATEWAY_ID } = env as Env & { OPENAI_API_KEY: string }
     const apiKey = (env as Env & { OPENAI_API_KEY: string }).OPENAI_API_KEY
 
@@ -49,7 +64,7 @@ const playJanken = createServerFn({ method: 'POST' })
         ? `これまでに相手（人間）が出した手の履歴（古い順）: ${recent.join('、')}。この傾向を読んで、相手が次に出しそうな手に勝てる手を選んでください。`
         : 'まだ対戦履歴はありません。'
 
-    const completion = await client.chat.completions.create({
+    const stream = await client.chat.completions.create({
       model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
       messages: [
         {
@@ -60,26 +75,63 @@ const playJanken = createServerFn({ method: 'POST' })
         { role: 'user', content: `${historyText}\nあなたの手を1つ選んでください。` },
       ],
       max_tokens: 4096,
+      stream: true,
     })
 
-    const choice = completion.choices[0]
-    const msg = choice?.message
-    const reasoning = (msg as { reasoning?: string } | undefined)?.reasoning ?? ''
-    const content = msg?.content ?? ''
-    // reasoningモデルなので content が空でも reasoning の中に答えが出ることがある
-    const text = `${content} ${reasoning}`.trim()
+    const encoder = new TextEncoder()
+    const send = (
+      controller: ReadableStreamDefaultController,
+      event: StreamEvent,
+    ) => controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'))
 
-    // 最後に出現した手を採用する（推論の途中に別の手が混ざるため）
-    const lastIndex = (hand: Hand) => text.lastIndexOf(hand)
-    const candidates = HANDS.map((h) => h.hand).filter((h) => lastIndex(h) >= 0)
-    if (candidates.length === 0) {
-      throw new Error(
-        `AIの返答が不正です: finish_reason=${choice?.finish_reason} usage=${JSON.stringify(completion.usage)} msg=${JSON.stringify(msg)}`,
-      )
-    }
-    const aiHand = candidates.sort((a, b) => lastIndex(b) - lastIndex(a))[0]
+    const body = new ReadableStream({
+      async start(controller) {
+        let reasoning = ''
+        let content = ''
+        try {
+          for await (const chunk of stream) {
+            const delta = chunk.choices[0]?.delta as
+              | { content?: string; reasoning?: string; reasoning_content?: string }
+              | undefined
+            const r = delta?.reasoning ?? delta?.reasoning_content
+            if (r) {
+              reasoning += r
+              send(controller, { type: 'reasoning', delta: r })
+            }
+            if (delta?.content) {
+              content += delta.content
+              send(controller, { type: 'content', delta: delta.content })
+            }
+          }
 
-    return { aiHand, result: judge(playerHand, aiHand), reasoning: reasoning || content }
+          const aiHand = pickHand(`${content} ${reasoning}`.trim())
+          if (!aiHand) {
+            send(controller, {
+              type: 'error',
+              message: `AIの返答から手を判定できませんでした: ${(content || reasoning).slice(-120)}`,
+            })
+          } else {
+            send(controller, {
+              type: 'done',
+              aiHand,
+              result: judge(playerHand, aiHand),
+              reasoning: reasoning || content,
+            })
+          }
+        } catch (e) {
+          send(controller, {
+            type: 'error',
+            message: e instanceof Error ? e.message : String(e),
+          })
+        } finally {
+          controller.close()
+        }
+      },
+    })
+
+    return new Response(body, {
+      headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8' },
+    })
   })
 
 export const Route = createFileRoute('/')({ component: App })
@@ -148,6 +200,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [history, setHistory] = useState<Hand[]>([])
   const [streak, setStreak] = useState(0)
+  const [liveReasoning, setLiveReasoning] = useState('')
 
   useEffect(() => {
     setHistory(loadHistory())
@@ -158,6 +211,7 @@ function App() {
     setPlayerHand(hand)
     setGameResult(null)
     setError(null)
+    setLiveReasoning('')
     setIsLoading(true)
 
     // 出した手を履歴に記録
@@ -167,10 +221,48 @@ function App() {
 
     try {
       // AIには今回の手を含める前の履歴（=これまでの傾向）を渡す
-      const result = await playJanken({ data: { hand, history } })
-      setGameResult(result)
+      const res = await playJanken({ data: { hand, history } })
+      const bodyStream = (res as Response).body
+      if (!bodyStream) throw new Error('ストリームを取得できませんでした')
+
+      const reader = bodyStream.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let reasoning = ''
+      let done: (StreamEvent & { type: 'done' }) | null = null
+      let streamError: string | null = null
+
+      // NDJSON を1行ずつパースしながらリアルタイムに反映
+      for (;;) {
+        const { done: readerDone, value } = await reader.read()
+        if (readerDone) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          const evt = JSON.parse(line) as StreamEvent
+          if (evt.type === 'reasoning') {
+            reasoning += evt.delta
+            setLiveReasoning(reasoning)
+          } else if (evt.type === 'done') {
+            done = evt
+          } else if (evt.type === 'error') {
+            streamError = evt.message
+          }
+        }
+      }
+
+      if (streamError) throw new Error(streamError)
+      if (!done) throw new Error('結果を受信できませんでした')
+
+      setGameResult({
+        aiHand: done.aiHand,
+        result: done.result,
+        reasoning: done.reasoning,
+      })
       // 連勝/連敗を更新
-      const updated = nextStreak(streak, result.result)
+      const updated = nextStreak(streak, done.result)
       setStreak(updated)
       saveStreak(updated)
     } catch (e) {
@@ -271,9 +363,20 @@ function App() {
         )}
 
         {isLoading && (
-          <div className="py-6">
+          <div className="py-4">
             <p className="mb-3 text-4xl">🤔</p>
-            <p className="text-[var(--sea-ink-soft)]">AIが考えています…</p>
+            <p className="mb-4 text-[var(--sea-ink-soft)]">AIが考えています…</p>
+            {liveReasoning && (
+              <div className="demo-code-block max-h-56 overflow-y-auto text-left">
+                <p className="mb-2 text-xs font-semibold text-[var(--sea-ink-soft)]">
+                  🧠 思考中…
+                </p>
+                <p className="whitespace-pre-wrap text-xs leading-relaxed text-[var(--sea-ink-soft)]">
+                  {liveReasoning}
+                  <span className="ml-0.5 inline-block animate-pulse">▋</span>
+                </p>
+              </div>
+            )}
           </div>
         )}
 
