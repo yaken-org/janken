@@ -9,6 +9,7 @@ type GameResult = {
   aiHand: Hand
   result: '勝ち' | '負け' | 'あいこ'
   reasoning: string
+  comment: string
 }
 
 const HANDS: Array<{ hand: Hand; emoji: string }> = [
@@ -34,7 +35,13 @@ type PlayInput = { hand: Hand; history: Hand[]; memory: string }
 type StreamEvent =
   | { type: 'reasoning'; delta: string }
   | { type: 'content'; delta: string }
-  | { type: 'done'; aiHand: Hand; result: GameResult['result']; reasoning: string }
+  | {
+      type: 'done'
+      aiHand: Hand
+      result: GameResult['result']
+      reasoning: string
+      comment: string
+    }
   | { type: 'error'; message: string }
 
 // テキストから最後に出現した手を採用する（推論の途中に別の手が混ざるため）
@@ -43,6 +50,50 @@ function pickHand(text: string): Hand | null {
   const candidates = HANDS.map((h) => h.hand).filter((h) => lastIndex(h) >= 0)
   if (candidates.length === 0) return null
   return candidates.sort((a, b) => lastIndex(b) - lastIndex(a))[0]
+}
+
+// 対戦結果を受けて、AIキャラクターの短いひとことコメントを生成する
+async function generateComment(
+  client: OpenAI,
+  playerHand: Hand,
+  aiHand: Hand,
+  result: GameResult['result'],
+): Promise<string> {
+  const outcome =
+    result === '勝ち'
+      ? 'あなた（AI）の負け'
+      : result === '負け'
+        ? 'あなた（AI）の勝ち'
+        : 'あいこ（引き分け）'
+  try {
+    const res = await client.chat.completions.create({
+      model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'あなたはじゃんけんAIのキャラクターです。対戦結果を受けて、相手プレイヤーに向けた短いひとことコメント（30文字以内・日本語・絵文字は1つまで）だけを返してください。説明や思考は書かないこと。',
+        },
+        {
+          role: 'user',
+          content: `あなたの手「${aiHand}」、相手の手「${playerHand}」、結果は${outcome}。ひとことどうぞ。`,
+        },
+      ],
+      max_tokens: 2048,
+    })
+    const msg = res.choices[0]?.message as
+      | { content?: string; reasoning?: string }
+      | undefined
+    const raw = (msg?.content ?? '').trim()
+    // content優先。無ければreasoningの最終行から一文を拾う
+    const text =
+      raw ||
+      (msg?.reasoning ?? '').trim().split('\n').filter(Boolean).pop() ||
+      ''
+    return text.replace(/^["「『]|["」』]$/g, '').slice(0, 60)
+  } catch {
+    return ''
+  }
 }
 
 const playJanken = createServerFn({ method: 'POST' })
@@ -119,11 +170,19 @@ const playJanken = createServerFn({ method: 'POST' })
               message: `AIの返答から手を判定できませんでした: ${(content || reasoning).slice(-120)}`,
             })
           } else {
+            const result = judge(playerHand, aiHand)
+            const comment = await generateComment(
+              client,
+              playerHand,
+              aiHand,
+              result,
+            )
             send(controller, {
               type: 'done',
               aiHand,
-              result: judge(playerHand, aiHand),
+              result,
               reasoning: reasoning || content,
+              comment,
             })
           }
         } catch (e) {
@@ -245,6 +304,13 @@ function analyzeTendencies(history: Hand[]): string {
   return `全体傾向 ${freqText}。直近は「${recentTop}」寄り。${transText}${repeatText}`.trim()
 }
 
+// AIコメントが取れなかったときの定型フォールバック
+function fallbackComment(result: GameResult['result']): string {
+  if (result === '勝ち') return 'やられた…！つよいね😤'
+  if (result === '負け') return 'よし、読みどおり！😎'
+  return 'ふふ、同じ手だね🤝'
+}
+
 function loadMemory(): string {
   if (typeof window === 'undefined') return ''
   return window.localStorage.getItem(MEMORY_KEY) ?? ''
@@ -328,6 +394,7 @@ function App() {
         aiHand: done.aiHand,
         result: done.result,
         reasoning: done.reasoning,
+        comment: done.comment?.trim() || fallbackComment(done.result),
       })
       // 連勝/連敗を更新
       const updated = nextStreak(streak, done.result)
@@ -505,6 +572,15 @@ function App() {
             >
               {resultEmoji} {gameResult.result}
             </div>
+
+            {gameResult.comment && (
+              <div className="demo-list-item mb-6 flex items-start gap-2 text-left">
+                <span className="text-xl leading-none">🤖</span>
+                <p className="text-sm leading-relaxed text-[var(--sea-ink)]">
+                  {gameResult.comment}
+                </p>
+              </div>
+            )}
 
             {streak !== 0 && (
               <p
