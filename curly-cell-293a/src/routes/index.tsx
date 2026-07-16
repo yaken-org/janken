@@ -35,14 +35,18 @@ type PlayInput = { hand: Hand; history: Hand[]; memory: string }
 type StreamEvent =
   | { type: 'reasoning'; delta: string }
   | { type: 'content'; delta: string }
+  // 結果はコメントより先に確定・送信する（切断されても結果は残る）
   | {
       type: 'done'
       aiHand: Hand
       result: GameResult['result']
       reasoning: string
-      comment: string
     }
+  // コメントは結果のあとに後追いで届く
+  | { type: 'comment'; text: string }
   | { type: 'error'; message: string }
+  // 無音区間でモバイル回線に切断されないための接続維持用
+  | { type: 'ping' }
 
 // テキストから最後に出現した手を採用する（推論の途中に別の手が混ざるため）
 function pickHand(text: string): Hand | null {
@@ -143,6 +147,16 @@ const playJanken = createServerFn({ method: 'POST' })
 
     const body = new ReadableStream({
       async start(controller) {
+        const ping = () => {
+          try {
+            send(controller, { type: 'ping' })
+          } catch {
+            /* controllerが閉じていたら無視 */
+          }
+        }
+        // 最初のバイトを即送ってストリームを確立する
+        ping()
+
         let reasoning = ''
         let content = ''
         try {
@@ -169,19 +183,29 @@ const playJanken = createServerFn({ method: 'POST' })
             })
           } else {
             const result = judge(playerHand, aiHand)
-            const comment = await generateComment(
-              client,
-              playerHand,
-              aiHand,
-              result,
-            )
+            // 先に結果を確定・送信する（このあと切断されても結果は残る）
             send(controller, {
               type: 'done',
               aiHand,
               result,
               reasoning: reasoning || content,
-              comment,
             })
+            // 結果送信後にコメントを生成して後追いで送る。
+            // 生成中は無音になるので定期pingで接続を維持する
+            const heartbeat = setInterval(ping, 4000)
+            try {
+              const comment = await generateComment(
+                client,
+                playerHand,
+                aiHand,
+                result,
+              )
+              send(controller, { type: 'comment', text: comment })
+            } catch {
+              /* コメントは任意。取得失敗時は送らない（結果は保持） */
+            } finally {
+              clearInterval(heartbeat)
+            }
           }
         } catch (e) {
           send(controller, {
@@ -361,8 +385,36 @@ function App() {
       const decoder = new TextDecoder()
       let buffer = ''
       let reasoning = ''
-      let done: (StreamEvent & { type: 'done' }) | null = null
+      let gotDone = false
       let streamError: string | null = null
+
+      // イベントが届くたびに即反映（結果は来た時点で確定させる）
+      const handleEvent = (evt: StreamEvent) => {
+        if (evt.type === 'reasoning') {
+          reasoning += evt.delta
+          setLiveReasoning(reasoning)
+        } else if (evt.type === 'done') {
+          gotDone = true
+          // 結果を先に表示する（このあとコメントが後追いで届く）
+          setGameResult({
+            aiHand: evt.aiHand,
+            result: evt.result,
+            reasoning: evt.reasoning,
+            comment: '',
+          })
+          setIsLoading(false)
+          const updated = nextStreak(streak, evt.result)
+          setStreak(updated)
+          saveStreak(updated)
+          const newMemory = analyzeTendencies(nextHistory)
+          setMemory(newMemory)
+          saveMemory(newMemory)
+        } else if (evt.type === 'comment') {
+          setGameResult((prev) => (prev ? { ...prev, comment: evt.text } : prev))
+        } else if (evt.type === 'error') {
+          streamError = evt.message
+        }
+      }
 
       // NDJSON を1行ずつパースしながらリアルタイムに反映
       for (;;) {
@@ -373,35 +425,12 @@ function App() {
         buffer = lines.pop() ?? ''
         for (const line of lines) {
           if (!line.trim()) continue
-          const evt = JSON.parse(line) as StreamEvent
-          if (evt.type === 'reasoning') {
-            reasoning += evt.delta
-            setLiveReasoning(reasoning)
-          } else if (evt.type === 'done') {
-            done = evt
-          } else if (evt.type === 'error') {
-            streamError = evt.message
-          }
+          handleEvent(JSON.parse(line) as StreamEvent)
         }
       }
 
       if (streamError) throw new Error(streamError)
-      if (!done) throw new Error('結果を受信できませんでした')
-
-      setGameResult({
-        aiHand: done.aiHand,
-        result: done.result,
-        reasoning: done.reasoning,
-        comment: done.comment,
-      })
-      // 連勝/連敗を更新
-      const updated = nextStreak(streak, done.result)
-      setStreak(updated)
-      saveStreak(updated)
-      // 今回の手を含めた履歴から傾向メモを作り直して保存
-      const newMemory = analyzeTendencies(nextHistory)
-      setMemory(newMemory)
-      saveMemory(newMemory)
+      if (!gotDone) throw new Error('結果を受信できませんでした')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setPlayerHand(null)
