@@ -18,6 +18,57 @@ const HANDS: Array<{ hand: Hand; emoji: string }> = [
   { hand: 'パー', emoji: '🖐️' },
 ]
 
+// AIの思考量（reasoningの予算＋考え方の指示）
+type ThinkLevel = 'low' | 'middle' | 'think' | 'superthink' | 'ultrathink'
+const THINK_LEVELS: Array<{
+  level: ThinkLevel
+  label: string
+  emoji: string
+  maxTokens: number
+  instruction: string
+}> = [
+  {
+    level: 'low',
+    label: 'low',
+    emoji: '💤',
+    maxTokens: 512,
+    instruction: '深く考えず、直感でさっと1手決めてください。',
+  },
+  {
+    level: 'middle',
+    label: 'middle',
+    emoji: '🙂',
+    maxTokens: 1024,
+    instruction: '軽く考えて1手決めてください。',
+  },
+  {
+    level: 'think',
+    label: 'think',
+    emoji: '🤔',
+    maxTokens: 2048,
+    instruction: '相手の傾向をふまえて考えてから決めてください。',
+  },
+  {
+    level: 'superthink',
+    label: 'superthink',
+    emoji: '🧠',
+    maxTokens: 4096,
+    instruction: '相手の傾向を深く分析し、慎重に選んでください。',
+  },
+  {
+    level: 'ultrathink',
+    label: 'ultrathink',
+    emoji: '🔮',
+    maxTokens: 8192,
+    instruction:
+      'あらゆる可能性と相手の傾向を徹底的に分析し尽くしてから、最善の1手を選んでください。',
+  },
+]
+
+const THINK_MAP = Object.fromEntries(
+  THINK_LEVELS.map((t) => [t.level, t]),
+) as Record<ThinkLevel, (typeof THINK_LEVELS)[number]>
+
 function judge(player: Hand, ai: Hand): '勝ち' | '負け' | 'あいこ' {
   if (player === ai) return 'あいこ'
   if (
@@ -29,7 +80,12 @@ function judge(player: Hand, ai: Hand): '勝ち' | '負け' | 'あいこ' {
   return '負け'
 }
 
-type PlayInput = { hand: Hand; history: Hand[]; memory: string }
+type PlayInput = {
+  hand: Hand
+  history: Hand[]
+  memory: string
+  think: ThinkLevel
+}
 
 // クライアントに1行ずつ流すストリームイベント（NDJSON）
 type StreamEvent =
@@ -100,9 +156,11 @@ async function generateComment(
 
 const playJanken = createServerFn({ method: 'POST' })
   .validator((input: PlayInput) => input)
-  .handler(async ({ data: { hand: playerHand, history, memory } }): Promise<Response> => {
+  .handler(async ({ data: { hand: playerHand, history, memory, think } }): Promise<Response> => {
     const { CF_ACCOUNT_ID, CF_GATEWAY_ID } = env as Env & { OPENAI_API_KEY: string }
     const apiKey = (env as Env & { OPENAI_API_KEY: string }).OPENAI_API_KEY
+    // 選ばれた思考量（未知の値でも think にフォールバック）
+    const thinkConf = THINK_MAP[think] ?? THINK_MAP.think
 
     const client = new OpenAI({
       apiKey,
@@ -128,14 +186,14 @@ const playJanken = createServerFn({ method: 'POST' })
         {
           role: 'system',
           content:
-            'あなたはじゃんけんの対戦相手です。相手の過去の手の傾向やメモを分析し、相手が次に出しそうな手に勝てる手を選びます。まず簡潔に考えたうえで、最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
+            'あなたはじゃんけんの対戦相手です。相手の過去の手の傾向やメモを分析し、相手が次に出しそうな手に勝てる手を選びます。最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
         },
         {
           role: 'user',
-          content: `${historyText}\n${memoryText}\nあなたの手を1つ選んでください。`,
+          content: `${historyText}\n${memoryText}\n${thinkConf.instruction}\nあなたの手を1つ選んでください。`,
         },
       ],
-      max_tokens: 4096,
+      max_tokens: thinkConf.maxTokens,
       stream: true,
     })
 
@@ -420,6 +478,24 @@ function getAnonName(): string {
   return name
 }
 
+// 選んだ思考量（localStorage）
+const THINK_KEY = 'janken-think'
+
+function loadThink(): ThinkLevel {
+  if (typeof window === 'undefined') return 'think'
+  const v = window.localStorage.getItem(THINK_KEY)
+  return THINK_LEVELS.some((t) => t.level === v) ? (v as ThinkLevel) : 'think'
+}
+
+function saveThink(level: ThinkLevel) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(THINK_KEY, level)
+  } catch {
+    /* ignore */
+  }
+}
+
 function App() {
   const [playerHand, setPlayerHand] = useState<Hand | null>(null)
   const [gameResult, setGameResult] = useState<GameResult | null>(null)
@@ -431,6 +507,7 @@ function App() {
   const [liveReasoning, setLiveReasoning] = useState('')
   const [ranking, setRanking] = useState<RankRecord[]>([])
   const [myId, setMyId] = useState('')
+  const [think, setThink] = useState<ThinkLevel>('think')
   const reasoningBoxRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -438,10 +515,16 @@ function App() {
     setStreak(loadStreak())
     setMemory(loadMemory())
     setMyId(getAnonId())
+    setThink(loadThink())
     getRanking()
       .then(setRanking)
       .catch(() => {})
   }, [])
+
+  const changeThink = (level: ThinkLevel) => {
+    setThink(level)
+    saveThink(level)
+  }
 
   // 思考過程が更新されるたびに一番下へ自動追尾
   useEffect(() => {
@@ -462,8 +545,8 @@ function App() {
     saveHistory(nextHistory)
 
     try {
-      // AIには今回の手を含める前の履歴と、蓄積した傾向メモを渡す
-      const res = await playJanken({ data: { hand, history, memory } })
+      // AIには今回の手を含める前の履歴・傾向メモ・思考量を渡す
+      const res = await playJanken({ data: { hand, history, memory, think } })
       const bodyStream = (res as Response).body
       if (!bodyStream) throw new Error('ストリームを取得できませんでした')
 
@@ -592,6 +675,28 @@ function App() {
                 {streak > 0 ? '🔥' : '💧'} {streakLabel(streak)}
               </p>
             )}
+            <div className="mb-6">
+              <p className="mb-2 text-xs font-semibold text-[var(--sea-ink-soft)]">
+                AIの思考量
+              </p>
+              <div className="flex flex-wrap justify-center gap-1.5">
+                {THINK_LEVELS.map((t) => (
+                  <button
+                    key={t.level}
+                    onClick={() => changeThink(t.level)}
+                    aria-pressed={think === t.level}
+                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                      think === t.level
+                        ? 'border-[var(--lagoon-deep)] bg-[rgba(79,184,178,0.22)] text-[var(--sea-ink)]'
+                        : 'border-[var(--line)] bg-[var(--chip-bg)] text-[var(--sea-ink-soft)]'
+                    }`}
+                  >
+                    {t.emoji} {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <p className="mb-6 text-[var(--sea-ink-soft)]">手を選んでください</p>
             <div className="flex justify-center gap-3">
               {HANDS.map(({ hand, emoji }) => (
