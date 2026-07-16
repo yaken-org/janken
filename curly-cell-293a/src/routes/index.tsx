@@ -49,12 +49,13 @@ const playJanken = createServerFn({ method: 'POST' })
       chat_template_kwargs: { thinking: false },
     })
 
-    const text = completion.choices[0]?.message.content?.trim() ?? ''
+    const msg = completion.choices[0]?.message
+    const text = (msg?.content ?? '').trim()
     let aiHand: Hand
     if (text.includes('グー')) aiHand = 'グー'
     else if (text.includes('チョキ')) aiHand = 'チョキ'
     else if (text.includes('パー')) aiHand = 'パー'
-    else throw new Error(`AIの返答が不正です: "${text}"`)
+    else throw new Error(`AIの返答が不正です: ${JSON.stringify(msg)}`)
 
     return { aiHand, result: judge(playerHand, aiHand) }
   })
