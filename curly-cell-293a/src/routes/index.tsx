@@ -164,7 +164,7 @@ function App() {
         : '🤝'
 
   return (
-    <main className="page-wrap flex min-h-[calc(100vh-8rem)] items-center justify-center px-4 py-8">
+    <main className="page-wrap flex min-h-screen items-center justify-center px-4 py-10">
       <div className="island-shell rise-in w-full max-w-sm rounded-[2rem] px-6 py-10 text-center">
         <p className="island-kicker mb-3">AI対戦</p>
         <h1 className="display-title mb-8 text-4xl font-bold text-[var(--sea-ink)]">
