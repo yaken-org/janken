@@ -223,6 +223,57 @@ const playJanken = createServerFn({ method: 'POST' })
     })
   })
 
+// ===== 連勝ランキング（KV, 匿名・最大100件） =====
+type RankRecord = { id: string; name: string; streak: number; at: number }
+const RANKING_KEY = 'leaderboard'
+const RANKING_MAX = 100
+
+async function readRanking(kv: KVNamespace): Promise<RankRecord[]> {
+  const raw = await kv.get(RANKING_KEY)
+  if (!raw) return []
+  try {
+    const list = JSON.parse(raw)
+    return Array.isArray(list) ? (list as RankRecord[]) : []
+  } catch {
+    return []
+  }
+}
+
+const getRanking = createServerFn({ method: 'GET' }).handler(
+  async (): Promise<RankRecord[]> => {
+    return readRanking((env as Env).RANKING)
+  },
+)
+
+const submitStreak = createServerFn({ method: 'POST' })
+  .validator((input: { id: string; name: string; streak: number }) => input)
+  .handler(async ({ data }): Promise<RankRecord[]> => {
+    const kv = (env as Env).RANKING
+    // 入力を軽くサニタイズ（匿名なので厳密な認証はしない）
+    const id = String(data.id).slice(0, 64)
+    const name = (String(data.name).trim() || '匿名').slice(0, 20)
+    const streak = Math.max(0, Math.min(9999, Math.floor(Number(data.streak) || 0)))
+    if (!id || streak <= 0) return readRanking(kv)
+
+    let list = await readRanking(kv)
+    const existing = list.find((r) => r.id === id)
+    if (existing) {
+      // 自己ベストを更新するときだけ書き換える
+      if (streak > existing.streak) {
+        existing.streak = streak
+        existing.name = name
+        existing.at = Date.now()
+      }
+    } else {
+      list.push({ id, name, streak, at: Date.now() })
+    }
+    // 連勝数の降順、同数なら達成が早い順
+    list.sort((a, b) => b.streak - a.streak || a.at - b.at)
+    list = list.slice(0, RANKING_MAX)
+    await kv.put(RANKING_KEY, JSON.stringify(list))
+    return list
+  })
+
 export const Route = createFileRoute('/')({ component: App })
 
 const HISTORY_KEY = 'janken-history'
@@ -283,6 +334,11 @@ function streakLabel(streak: number): string {
   return '記録なし'
 }
 
+// ランキング上位のメダル
+function medal(index: number): string {
+  return ['🥇', '🥈', '🥉'][index] ?? ''
+}
+
 // 履歴から相手の傾向を分析して、AIに渡す/localStorageに残す「メモリ」を作る
 function analyzeTendencies(history: Hand[]): string {
   if (history.length < 3) return ''
@@ -340,6 +396,30 @@ function saveMemory(memory: string) {
   }
 }
 
+// 匿名の識別子と表示名（localStorage、端末ごとに1つ）
+const UID_KEY = 'janken-uid'
+const NAME_KEY = 'janken-name'
+
+function getAnonId(): string {
+  if (typeof window === 'undefined') return ''
+  let id = window.localStorage.getItem(UID_KEY)
+  if (!id) {
+    id = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)
+    window.localStorage.setItem(UID_KEY, id)
+  }
+  return id
+}
+
+function getAnonName(): string {
+  if (typeof window === 'undefined') return '匿名'
+  let name = window.localStorage.getItem(NAME_KEY)
+  if (!name) {
+    name = `匿名${Math.random().toString(36).slice(2, 6)}`
+    window.localStorage.setItem(NAME_KEY, name)
+  }
+  return name
+}
+
 function App() {
   const [playerHand, setPlayerHand] = useState<Hand | null>(null)
   const [gameResult, setGameResult] = useState<GameResult | null>(null)
@@ -349,12 +429,18 @@ function App() {
   const [streak, setStreak] = useState(0)
   const [memory, setMemory] = useState('')
   const [liveReasoning, setLiveReasoning] = useState('')
+  const [ranking, setRanking] = useState<RankRecord[]>([])
+  const [myId, setMyId] = useState('')
   const reasoningBoxRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setHistory(loadHistory())
     setStreak(loadStreak())
     setMemory(loadMemory())
+    setMyId(getAnonId())
+    getRanking()
+      .then(setRanking)
+      .catch(() => {})
   }, [])
 
   // 思考過程が更新されるたびに一番下へ自動追尾
@@ -409,6 +495,14 @@ function App() {
           const newMemory = analyzeTendencies(nextHistory)
           setMemory(newMemory)
           saveMemory(newMemory)
+          // 連勝中ならランキングに自己ベストを登録（匿名）
+          if (updated > 0) {
+            submitStreak({
+              data: { id: getAnonId(), name: getAnonName(), streak: updated },
+            })
+              .then(setRanking)
+              .catch(() => {})
+          }
         } else if (evt.type === 'comment') {
           setGameResult((prev) => (prev ? { ...prev, comment: evt.text } : prev))
         } else if (evt.type === 'error') {
@@ -467,6 +561,10 @@ function App() {
     saveMemory('')
     handleReset()
   }
+
+  const myRankIndex = ranking.findIndex((r) => r.id === myId)
+  const myRank = myRankIndex >= 0 ? myRankIndex + 1 : null
+  const myBest = myRankIndex >= 0 ? ranking[myRankIndex].streak : 0
 
   const resultEmoji =
     gameResult?.result === '勝ち'
@@ -535,6 +633,44 @@ function App() {
                 >
                   履歴をクリア
                 </button>
+              </div>
+            )}
+
+            {ranking.length > 0 && (
+              <div className="mt-8 text-left">
+                <p className="mb-2 text-center text-xs font-semibold text-[var(--sea-ink-soft)]">
+                  🏆 連勝ランキング（匿名・上位{Math.min(ranking.length, 10)}位）
+                </p>
+                <ol className="space-y-1">
+                  {ranking.slice(0, 10).map((r, i) => (
+                    <li
+                      key={r.id}
+                      className={`flex items-center justify-between rounded-lg px-3 py-1.5 text-sm ${
+                        r.id === myId
+                          ? 'bg-[rgba(79,184,178,0.18)] font-semibold'
+                          : 'bg-[var(--chip-bg)]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2 truncate">
+                        <span className="w-5 shrink-0 text-right text-[var(--sea-ink-soft)]">
+                          {i + 1}
+                        </span>
+                        <span className="truncate">
+                          {medal(i)} {r.name}
+                          {r.id === myId ? '（あなた）' : ''}
+                        </span>
+                      </span>
+                      <span className="shrink-0 font-bold text-[var(--palm)]">
+                        {r.streak}連勝
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+                {myRank && myRank > 10 && (
+                  <p className="mt-2 text-center text-xs text-[var(--sea-ink-soft)]">
+                    あなたの順位: {myRank}位（{myBest}連勝）
+                  </p>
+                )}
               </div>
             )}
           </>

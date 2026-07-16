@@ -17,7 +17,13 @@
 	"vars": {
 		"CF_ACCOUNT_ID": "1329af2ae6bed23f31346a1baabf7cbe",
 		"CF_GATEWAY_ID": "yaken-ai"
-	}
+	},
+	"kv_namespaces": [
+		{
+			"binding": "RANKING",
+			"id": "be0890d4f4fe4a38827bc078dc8bf734"
+		}
+	]
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
