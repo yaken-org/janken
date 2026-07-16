@@ -35,7 +35,7 @@ const playJanken = createServerFn({ method: 'POST' })
       baseURL: `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${CF_GATEWAY_ID}/custom-spark-cccd`,
     })
 
-    const completion = await client.chat.completions.create({
+    const completion = await (client.chat.completions.create as (p: object) => Promise<{ choices: Array<{ message: { content: string | null } }> }>)({
       model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
       messages: [
         {
@@ -46,6 +46,7 @@ const playJanken = createServerFn({ method: 'POST' })
         { role: 'user', content: 'じゃんけんの手を1つ選んでください。' },
       ],
       max_tokens: 10,
+      chat_template_kwargs: { thinking: false },
     })
 
     const text = completion.choices[0]?.message.content?.trim() ?? ''
