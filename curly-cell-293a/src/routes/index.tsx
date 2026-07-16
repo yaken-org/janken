@@ -42,8 +42,8 @@ const playJanken = createServerFn({ method: 'POST' })
       defaultHeaders: { 'cf-aig-skip-cache': 'true' },
     })
 
-    // 直近の履歴を新しい順に最大20件渡す
-    const recent = history.slice(-20)
+    // 直近の履歴を最大20件渡す（history が無い/不正でも落ちないようガード）
+    const recent = Array.isArray(history) ? history.slice(-20) : []
     const historyText =
       recent.length > 0
         ? `これまでに相手（人間）が出した手の履歴（古い順）: ${recent.join('、')}。この傾向を読んで、相手が次に出しそうな手に勝てる手を選んでください。`
