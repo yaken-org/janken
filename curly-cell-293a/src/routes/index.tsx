@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
 import { env } from 'cloudflare:workers'
 import OpenAI from 'openai'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 type Hand = 'グー' | 'チョキ' | 'パー'
 type GameResult = {
@@ -28,9 +28,11 @@ function judge(player: Hand, ai: Hand): '勝ち' | '負け' | 'あいこ' {
   return '負け'
 }
 
+type PlayInput = { hand: Hand; history: Hand[] }
+
 const playJanken = createServerFn({ method: 'POST' })
-  .validator((hand: Hand) => hand)
-  .handler(async ({ data: playerHand }): Promise<GameResult> => {
+  .validator((input: PlayInput) => input)
+  .handler(async ({ data: { hand: playerHand, history } }): Promise<GameResult> => {
     const { CF_ACCOUNT_ID, CF_GATEWAY_ID } = env as Env & { OPENAI_API_KEY: string }
     const apiKey = (env as Env & { OPENAI_API_KEY: string }).OPENAI_API_KEY
 
@@ -40,15 +42,22 @@ const playJanken = createServerFn({ method: 'POST' })
       defaultHeaders: { 'cf-aig-skip-cache': 'true' },
     })
 
+    // 直近の履歴を新しい順に最大20件渡す
+    const recent = history.slice(-20)
+    const historyText =
+      recent.length > 0
+        ? `これまでに相手（人間）が出した手の履歴（古い順）: ${recent.join('、')}。この傾向を読んで、相手が次に出しそうな手に勝てる手を選んでください。`
+        : 'まだ対戦履歴はありません。'
+
     const completion = await client.chat.completions.create({
       model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
       messages: [
         {
           role: 'system',
           content:
-            'あなたはじゃんけんの対戦相手です。まず簡潔に考えたうえで、最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
+            'あなたはじゃんけんの対戦相手です。相手の過去の手の傾向を分析し、勝てる手を選びます。まず簡潔に考えたうえで、最後の行に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
         },
-        { role: 'user', content: 'じゃんけんの手を1つ選んでください。' },
+        { role: 'user', content: `${historyText}\nあなたの手を1つ選んでください。` },
       ],
       max_tokens: 4096,
     })
@@ -75,19 +84,57 @@ const playJanken = createServerFn({ method: 'POST' })
 
 export const Route = createFileRoute('/')({ component: App })
 
+const HISTORY_KEY = 'janken-history'
+
+function loadHistory(): Hand[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(HISTORY_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((h): h is Hand =>
+      HANDS.some((x) => x.hand === h),
+    )
+  } catch {
+    return []
+  }
+}
+
+function saveHistory(history: Hand[]) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history))
+  } catch {
+    /* ignore */
+  }
+}
+
 function App() {
   const [playerHand, setPlayerHand] = useState<Hand | null>(null)
   const [gameResult, setGameResult] = useState<GameResult | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [history, setHistory] = useState<Hand[]>([])
+
+  useEffect(() => {
+    setHistory(loadHistory())
+  }, [])
 
   const handlePlay = async (hand: Hand) => {
     setPlayerHand(hand)
     setGameResult(null)
     setError(null)
     setIsLoading(true)
+
+    // 出した手を履歴に記録
+    const nextHistory = [...history, hand]
+    setHistory(nextHistory)
+    saveHistory(nextHistory)
+
     try {
-      const result = await playJanken({ data: hand })
+      // AIには今回の手を含める前の履歴（=これまでの傾向）を渡す
+      const result = await playJanken({ data: { hand, history } })
       setGameResult(result)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -101,6 +148,12 @@ function App() {
     setPlayerHand(null)
     setGameResult(null)
     setError(null)
+  }
+
+  const clearHistory = () => {
+    setHistory([])
+    saveHistory([])
+    handleReset()
   }
 
   const resultEmoji =
@@ -133,6 +186,26 @@ function App() {
                 </button>
               ))}
             </div>
+
+            {history.length > 0 && (
+              <div className="mt-8">
+                <p className="mb-2 text-xs text-[var(--sea-ink-soft)]">
+                  あなたの手の履歴（{history.length}回）— AIが分析に使います
+                </p>
+                <p className="mb-3 text-lg tracking-wide">
+                  {history
+                    .slice(-15)
+                    .map((h) => HANDS.find((x) => x.hand === h)?.emoji)
+                    .join(' ')}
+                </p>
+                <button
+                  onClick={clearHistory}
+                  className="demo-button demo-button-secondary text-xs"
+                >
+                  履歴をクリア
+                </button>
+              </div>
+            )}
           </>
         )}
 
