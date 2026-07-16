@@ -343,7 +343,7 @@ function App() {
             {history.length > 0 && (
               <div className="mt-8">
                 <p className="mb-2 text-xs text-[var(--sea-ink-soft)]">
-                  あなたの手の履歴（{history.length}回）— AIが分析に使います
+                  あなたの手の履歴（{history.length}回）— ローカルに保存されています
                 </p>
                 <p className="mb-3 text-lg tracking-wide">
                   {history
