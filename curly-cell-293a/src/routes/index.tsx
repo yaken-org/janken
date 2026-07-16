@@ -41,11 +41,11 @@ const playJanken = createServerFn({ method: 'POST' })
         {
           role: 'system',
           content:
-            '/no_think あなたはじゃんけんの対戦相手です。「グー」「チョキ」「パー」のいずれか1語だけを返してください。それ以外の文字は絶対に含めないでください。',
+            'あなたはじゃんけんの対戦相手です。最後に「グー」「チョキ」「パー」のいずれか1語だけを出力してください。',
         },
         { role: 'user', content: 'じゃんけんの手を1つ選んでください。' },
       ],
-      max_tokens: 10,
+      max_tokens: 2048,
     })
 
     const msg = completion.choices[0]?.message
