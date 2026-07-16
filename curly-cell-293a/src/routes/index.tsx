@@ -86,7 +86,6 @@ export const Route = createFileRoute('/')({ component: App })
 
 const HISTORY_KEY = 'janken-history'
 const STREAK_KEY = 'janken-streak'
-const SITE_URL = 'https://curly-cell-293a.yaken.workers.dev'
 
 function loadHistory(): Hand[] {
   if (typeof window === 'undefined') return []
@@ -192,7 +191,8 @@ function App() {
     const text = `${headline}\n#じゃんけん #AI対戦`
     const url = new URL('https://twitter.com/intent/tweet')
     url.searchParams.set('text', text)
-    url.searchParams.set('url', SITE_URL)
+    // 独自ドメイン等に対応するため、現在アクセス中のURLを使う
+    url.searchParams.set('url', window.location.origin)
     window.open(url.toString(), '_blank', 'noopener,noreferrer')
   }
 
