@@ -35,18 +35,17 @@ const playJanken = createServerFn({ method: 'POST' })
       baseURL: `https://gateway.ai.cloudflare.com/v1/${CF_ACCOUNT_ID}/${CF_GATEWAY_ID}/custom-spark-cccd`,
     })
 
-    const completion = await (client.chat.completions.create as (p: object) => Promise<{ choices: Array<{ message: { content: string | null } }> }>)({
+    const completion = await client.chat.completions.create({
       model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
       messages: [
         {
           role: 'system',
           content:
-            'あなたはじゃんけんの対戦相手です。「グー」「チョキ」「パー」のいずれか1語だけを返してください。それ以外の文字は絶対に含めないでください。',
+            '/no_think あなたはじゃんけんの対戦相手です。「グー」「チョキ」「パー」のいずれか1語だけを返してください。それ以外の文字は絶対に含めないでください。',
         },
         { role: 'user', content: 'じゃんけんの手を1つ選んでください。' },
       ],
       max_tokens: 10,
-      chat_template_kwargs: { thinking: false },
     })
 
     const msg = completion.choices[0]?.message
