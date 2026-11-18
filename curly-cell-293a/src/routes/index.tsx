@@ -126,7 +126,7 @@ async function generateComment(
         ? 'あなた（AI）の勝ち'
         : 'あいこ（引き分け）'
   const res = await client.chat.completions.create({
-    model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
+    model: 'nvidia/Qwen3.8-27B-NVFP4',
     messages: [
       {
         role: 'system',
@@ -181,7 +181,7 @@ const playJanken = createServerFn({ method: 'POST' })
         : ''
 
     const stream = await client.chat.completions.create({
-      model: 'nvidia/Qwen3.6-35B-A3B-NVFP4',
+      model: 'nvidia/Qwen3.8-27B-NVFP4',
       messages: [
         {
           role: 'system',
